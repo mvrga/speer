@@ -117,22 +117,38 @@ def _clean_iban(raw_iban: str | None) -> str | None:
     return re.sub(r"\s+", "", raw_iban)
 
 
+def _iban_to_int_string(iban: str) -> str:
+    converted = []
+    for char in iban:
+        if char.isdigit():
+            converted.append(char)
+        else:
+            converted.append(str(ord(char) - 55))
+    return "".join(converted)
+
+
+def _is_valid_iban(iban: str) -> bool:
+    if len(iban) < 15 or len(iban) > 34:
+        return False
+    if not iban[:2].isalpha():
+        return False
+    if not iban[2:].isalnum():
+        return False
+    rearranged = iban[4:] + iban[:4]
+    numeric = _iban_to_int_string(rearranged)
+    remainder = 0
+    for digit in numeric:
+        remainder = (remainder * 10 + int(digit)) % 97
+    return remainder == 1
+
+
 def _select_iban(text: str) -> str | None:
-    iban_pattern = re.compile(r"\b([A-Z]{2}[0-9A-Z][0-9A-Z\s]{11,32})\b")
-    candidates: list[str] = []
+    iban_pattern = re.compile(r"\b([A-Z]{2}[0-9A-Z\s]{13,34})\b")
     for match in iban_pattern.findall(text.upper()):
-        cleaned = _clean_iban(match)
-        if cleaned is None:
-            continue
-        if not cleaned[:2].isalpha():
-            continue
-        if not cleaned[2:].isalnum():
-            continue
-        if 15 <= len(cleaned) <= 34:
-            candidates.append(cleaned)
-    if not candidates:
-        return None
-    return max(candidates, key=len)
+        candidate = _clean_iban(match)
+        if candidate and _is_valid_iban(candidate):
+            return candidate
+    return None
 
 
 def _select_bic(text: str) -> str | None:
@@ -153,6 +169,30 @@ def _safe_export_value(value: str | None, fallback: str) -> str:
         return fallback
     cleaned = value.strip()
     return cleaned if cleaned else fallback
+
+
+def _suggested_action(parse_errors: Iterable[str]) -> str:
+    errors = set(parse_errors)
+    actions: list[str] = []
+    if "iban_missing" in errors or "iban_missing_or_invalid" in errors:
+        actions.append("Fill IBAN")
+    if "total_amount_missing" in errors or "total_amount_invalid" in errors:
+        actions.append("Fill amount")
+    if "invoice_number_missing" in errors:
+        actions.append("Fill invoice number")
+    if "invoice_date_missing" in errors:
+        actions.append("Fill invoice date")
+    if any(error.startswith("pdf_read_error") for error in errors):
+        actions.append("Check PDF file")
+    if any(error.startswith("ocr_error") for error in errors):
+        actions.append("Review scan quality")
+    if any(error.startswith("unsupported_format") for error in errors):
+        actions.append("Convert to PDF")
+    if any(error.startswith("non_pdf_evidence") for error in errors):
+        actions.append("Provide PDF version")
+    if not actions:
+        actions.append("Review evidence manually")
+    return ", ".join(actions)
 
 
 def _parse_fields(text: str, file_path: Path) -> tuple[dict, list[str]]:
@@ -178,6 +218,9 @@ def _parse_fields(text: str, file_path: Path) -> tuple[dict, list[str]]:
     currency = "EUR"
 
     iban = _select_iban(text)
+    if iban is None:
+        parse_errors.append("iban_missing_or_invalid")
+
     bic = _select_bic(text)
 
     total_amount = None
@@ -197,9 +240,6 @@ def _parse_fields(text: str, file_path: Path) -> tuple[dict, list[str]]:
 
     if invoice_date is None:
         parse_errors.append("invoice_date_missing")
-
-    if iban is None:
-        parse_errors.append("iban_missing")
 
     if total_amount is not None and total_amount <= 0:
         parse_errors.append("total_amount_non_positive")
@@ -264,7 +304,7 @@ def parse_pdf(file_path: Path) -> EvidenceRecord:
                 "invoice_number": None,
                 "invoice_date": None,
                 "total_amount": None,
-                "currency": None,
+                "currency": "EUR",
                 "iban": None,
                 "bic": None,
             },
@@ -320,7 +360,7 @@ def parse_image(file_path: Path) -> EvidenceRecord:
                 "invoice_number": None,
                 "invoice_date": None,
                 "total_amount": None,
-                "currency": None,
+                "currency": "EUR",
                 "iban": None,
                 "bic": None,
             },
@@ -348,7 +388,7 @@ def parse_xml(file_path: Path) -> EvidenceRecord:
             "invoice_number": None,
             "invoice_date": None,
             "total_amount": None,
-            "currency": None,
+            "currency": "EUR",
             "iban": None,
             "bic": None,
         },
@@ -374,7 +414,7 @@ def detect_and_parse(file_path: Path) -> EvidenceRecord:
             "invoice_number": None,
             "invoice_date": None,
             "total_amount": None,
-            "currency": None,
+            "currency": "EUR",
             "iban": None,
             "bic": None,
         },
@@ -462,7 +502,7 @@ def export_payment_instructions(records: Iterable[EvidenceRecord], output_path: 
             getattr(record, "beneficiary_name", None), "UNKNOWN"
         )
         reference = _safe_export_value(record.invoice_number, record.file_name)
-        reference = _safe_export_value(reference, "UNKNOWN")
+        reference = _safe_export_value(reference, record.file_name)
         worksheet.append(
             [
                 beneficiary_name,
@@ -475,30 +515,6 @@ def export_payment_instructions(records: Iterable[EvidenceRecord], output_path: 
         )
 
     workbook.save(output_path)
-
-
-def _suggested_action(parse_errors: Iterable[str]) -> str:
-    errors = set(parse_errors)
-    actions: list[str] = []
-    if "iban_missing" in errors:
-        actions.append("Fill IBAN")
-    if "total_amount_missing" in errors or "total_amount_invalid" in errors:
-        actions.append("Fill amount")
-    if "invoice_number_missing" in errors:
-        actions.append("Fill invoice number")
-    if "invoice_date_missing" in errors:
-        actions.append("Fill invoice date")
-    if any(error.startswith("pdf_read_error") for error in errors):
-        actions.append("Check PDF file")
-    if any(error.startswith("ocr_error") for error in errors):
-        actions.append("Review scan quality")
-    if any(error.startswith("unsupported_format") for error in errors):
-        actions.append("Convert to PDF")
-    if any(error.startswith("non_pdf_evidence") for error in errors):
-        actions.append("Provide PDF version")
-    if not actions:
-        actions.append("Review evidence manually")
-    return ", ".join(actions)
 
 
 def export_review_pack(records: Iterable[EvidenceRecord], output_path: Path) -> None:
