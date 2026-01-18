@@ -117,35 +117,68 @@ def _clean_iban(raw_iban: str | None) -> str | None:
     return re.sub(r"\s+", "", raw_iban)
 
 
+def _select_iban(text: str) -> str | None:
+    iban_pattern = re.compile(r"\b([A-Z]{2}[0-9A-Z][0-9A-Z\s]{11,32})\b")
+    candidates: list[str] = []
+    for match in iban_pattern.findall(text.upper()):
+        cleaned = _clean_iban(match)
+        if cleaned is None:
+            continue
+        if not cleaned[:2].isalpha():
+            continue
+        if not cleaned[2:].isalnum():
+            continue
+        if 15 <= len(cleaned) <= 34:
+            candidates.append(cleaned)
+    if not candidates:
+        return None
+    return max(candidates, key=len)
+
+
+def _select_bic(text: str) -> str | None:
+    bic_pattern = re.compile(r"\b([A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?)\b")
+    banned = {"DESCRIPTION", "SECURITY"}
+    for match in bic_pattern.findall(text.upper()):
+        candidate = match[0]
+        if candidate in banned:
+            continue
+        if len(candidate) not in {8, 11}:
+            continue
+        return candidate
+    return None
+
+
+def _safe_export_value(value: str | None, fallback: str) -> str:
+    if value is None:
+        return fallback
+    cleaned = value.strip()
+    return cleaned if cleaned else fallback
+
+
 def _parse_fields(text: str, file_path: Path) -> tuple[dict, list[str]]:
     parse_errors: list[str] = []
 
     invoice_number_pattern = re.compile(
-        r"(?:invoice\s*number|invoice\s*no\.?|inv\.\s*no\.?|facture\s*no\.?|rechnung\s*nr\.?)\s*[:#]?\s*([A-Z0-9\-/]+)",
+        r"(?:invoice\s*number|invoice\s*no\.?|inv\.\s*no\.?|facture\s*no\.?|rechnungsnummer|rechnung[-\s]*nr\.?|belegnummer|vorgangsnummer)\s*[:#]?\s*([A-Z0-9\-/]+)",
         re.IGNORECASE,
     )
     invoice_date_pattern = re.compile(
-        r"(?:invoice\s*date|date)\s*[:#]?\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2}|[0-9]{2}[-/][0-9]{2}[-/][0-9]{4})",
+        r"(?:invoice\s*date|date|rechnungsdatum)\s*[:#]?\s*([0-9]{4}[-/][0-9]{2}[-/][0-9]{2}|[0-9]{2}[-/][0-9]{2}[-/][0-9]{4}|[0-9]{2}\.[0-9]{2}\.[0-9]{4})",
         re.IGNORECASE,
     )
     total_amount_pattern = re.compile(
-        r"(?:total\s*amount|amount\s*due|total)\s*[:#]?\s*([0-9][0-9\s.,]*)",
+        r"(?:total\s*amount|amount\s*due|total|gesamtbetrag|rechnungsbetrag|zu\s*zahlen|summe)\s*[:#]?\s*([0-9][0-9\s.,]*)",
         re.IGNORECASE,
     )
-    currency_pattern = re.compile(r"\b(EUR|€)\b", re.IGNORECASE)
-    iban_pattern = re.compile(r"\b([A-Z]{2}[0-9A-Z\s]{13,34})\b")
-    bic_pattern = re.compile(r"\b([A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?)\b")
 
     invoice_number = _first_match(invoice_number_pattern, text)
     invoice_date = _first_match(invoice_date_pattern, text)
     raw_amount = _first_match(total_amount_pattern, text)
 
-    currency = "EUR" if currency_pattern.search(text) else None
-    if currency is None:
-        parse_errors.append("currency_missing")
+    currency = "EUR"
 
-    iban = _clean_iban(_first_match(iban_pattern, text))
-    bic = _first_match(bic_pattern, text)
+    iban = _select_iban(text)
+    bic = _select_bic(text)
 
     total_amount = None
     if raw_amount:
@@ -425,18 +458,47 @@ def export_payment_instructions(records: Iterable[EvidenceRecord], output_path: 
     for record in records:
         if not record.payment_ready:
             continue
+        beneficiary_name = _safe_export_value(
+            getattr(record, "beneficiary_name", None), "UNKNOWN"
+        )
+        reference = _safe_export_value(record.invoice_number, record.file_name)
+        reference = _safe_export_value(reference, "UNKNOWN")
         worksheet.append(
             [
-                None,
+                beneficiary_name,
                 record.iban,
                 record.bic,
                 record.total_amount,
                 record.currency,
-                record.invoice_number,
+                reference,
             ]
         )
 
     workbook.save(output_path)
+
+
+def _suggested_action(parse_errors: Iterable[str]) -> str:
+    errors = set(parse_errors)
+    actions: list[str] = []
+    if "iban_missing" in errors:
+        actions.append("Fill IBAN")
+    if "total_amount_missing" in errors or "total_amount_invalid" in errors:
+        actions.append("Fill amount")
+    if "invoice_number_missing" in errors:
+        actions.append("Fill invoice number")
+    if "invoice_date_missing" in errors:
+        actions.append("Fill invoice date")
+    if any(error.startswith("pdf_read_error") for error in errors):
+        actions.append("Check PDF file")
+    if any(error.startswith("ocr_error") for error in errors):
+        actions.append("Review scan quality")
+    if any(error.startswith("unsupported_format") for error in errors):
+        actions.append("Convert to PDF")
+    if any(error.startswith("non_pdf_evidence") for error in errors):
+        actions.append("Provide PDF version")
+    if not actions:
+        actions.append("Review evidence manually")
+    return ", ".join(actions)
 
 
 def export_review_pack(records: Iterable[EvidenceRecord], output_path: Path) -> None:
@@ -447,10 +509,13 @@ def export_review_pack(records: Iterable[EvidenceRecord], output_path: Path) -> 
     headers = [
         "file_name",
         "status",
+        "extraction_method",
         "total_amount",
         "currency",
         "iban",
         "invoice_number",
+        "text_preview",
+        "suggested_action",
         "parse_errors",
     ]
     worksheet.append(headers)
@@ -462,10 +527,13 @@ def export_review_pack(records: Iterable[EvidenceRecord], output_path: Path) -> 
             [
                 record.file_name,
                 record.status,
+                record.extraction_method,
                 record.total_amount,
                 record.currency,
                 record.iban,
                 record.invoice_number,
+                record.text_preview,
+                _suggested_action(record.parse_errors),
                 ";".join(record.parse_errors),
             ]
         )
