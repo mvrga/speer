@@ -48,7 +48,7 @@ HTML_PAGE = """
       padding: 2rem 1.25rem 3rem;
     }
     .wrap {
-      max-width: 900px;
+      max-width: 980px;
       margin: 0 auto;
       background: #fdfbf6;
       border: 1px solid #e1d6c5;
@@ -62,7 +62,7 @@ HTML_PAGE = """
       letter-spacing: 0.02em;
     }
     p {
-      margin: 0 0 1.5rem;
+      margin: 0 0 1.25rem;
       font-size: 1.05rem;
       line-height: 1.5;
     }
@@ -75,7 +75,7 @@ HTML_PAGE = """
     }
     .summary {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 1rem;
       margin-bottom: 1.5rem;
     }
@@ -153,6 +153,13 @@ HTML_PAGE = """
       text-decoration: none;
       font-weight: 600;
     }
+    .notice {
+      border-left: 4px solid #9c4a2e;
+      padding: 0.75rem 1rem;
+      background: #fff5ec;
+      color: #5a3220;
+      margin-bottom: 1.5rem;
+    }
     .muted {
       color: #6b5a46;
       font-size: 0.95rem;
@@ -170,7 +177,11 @@ HTML_PAGE = """
 <body>
   <div class="wrap">
     <h1>Speer Dashboard</h1>
-    <p>Every invoice is captured as evidence. Files that cannot be parsed remain visible and require review.</p>
+    <p>Every file is stored as financial evidence. If Speer is unsure, it marks the file for review.</p>
+
+    <div class="notice">
+      Payments are never executed automatically. Always review and approve before sending any payment file.
+    </div>
 
     <div class="panel">
       <form action="/upload" method="post" enctype="multipart/form-data">
@@ -182,7 +193,7 @@ HTML_PAGE = """
 
     <div class="summary">
       <div class="summary-card">
-        <h3>Total processed</h3>
+        <h3>Total uploaded</h3>
         <strong>{{total_count}}</strong>
       </div>
       <div class="summary-card">
@@ -202,6 +213,7 @@ HTML_PAGE = """
           <tr>
             <th>File name</th>
             <th>Status</th>
+            <th>Payment ready</th>
             <th>Amount (EUR)</th>
           </tr>
         </thead>
@@ -212,6 +224,7 @@ HTML_PAGE = """
       <div class="actions">
         <a href="/download/all">Download Excel (all invoices)</a>
         <a href="/download/ok">Download payment file</a>
+        <a href="/download/review">Download review file</a>
       </div>
     </div>
   </div>
@@ -246,14 +259,17 @@ def _record_from_dict(data: dict) -> speer_core.EvidenceRecord:
         file_path=file_path,
         file_name=file_name,
         sha256=str(data.get("sha256", "")),
+        evidence_type=str(data.get("evidence_type", "unknown")),
+        extraction_method=str(data.get("extraction_method", "unknown")),
+        text_preview=str(data.get("text_preview", "")),
         invoice_number=data.get("invoice_number"),
         invoice_date=data.get("invoice_date"),
         total_amount=data.get("total_amount"),
-        currency=str(data.get("currency", "EUR")),
+        currency=data.get("currency"),
         iban=data.get("iban"),
         bic=data.get("bic"),
-        beneficiary_name=data.get("beneficiary_name"),
         status=str(data.get("status", "needs_review")),
+        payment_ready=bool(data.get("payment_ready")),
         parse_errors=list(data.get("parse_errors", [])),
     )
 
@@ -267,21 +283,24 @@ def _non_pdf_record(
         file_path=file_path,
         file_name=Path(file_path).name,
         sha256=file_hash,
+        evidence_type="unknown",
+        extraction_method="unknown",
+        text_preview="",
         invoice_number=None,
         invoice_date=None,
         total_amount=None,
-        currency="EUR",
+        currency=None,
         iban=None,
         bic=None,
-        beneficiary_name=None,
         status="needs_review",
+        payment_ready=False,
         parse_errors=parse_errors,
     )
 
 
 def _render_dashboard(records: list[speer_core.EvidenceRecord]) -> str:
     total_count = len(records)
-    ok_count = sum(1 for record in records if record.status == "ok")
+    ok_count = sum(1 for record in records if record.payment_ready)
     review_count = total_count - ok_count
 
     if records:
@@ -291,17 +310,19 @@ def _render_dashboard(records: list[speer_core.EvidenceRecord]) -> str:
                 f"{record.total_amount:.2f}" if record.total_amount is not None else "-"
             )
             status_class = "status-ok" if record.status == "ok" else "status-review"
+            payment_ready = "Yes" if record.payment_ready else "No"
             rows.append(
                 "<tr>"
                 f"<td>{record.file_name}</td>"
                 f"<td class=\"{status_class}\">{record.status.replace('_', ' ')}</td>"
+                f"<td>{payment_ready}</td>"
                 f"<td>{amount}</td>"
                 "</tr>"
             )
         table_rows = "\n".join(rows)
     else:
         table_rows = (
-            "<tr><td colspan=\"3\">No evidence uploaded yet.</td></tr>"
+            "<tr><td colspan=\"4\">No evidence uploaded yet.</td></tr>"
         )
 
     return (
@@ -317,21 +338,33 @@ def _export_outputs(records: list[speer_core.EvidenceRecord], run_id: str) -> di
     xlsx_path = EXPORT_DIR / f"speer_{run_id}_{timestamp}.xlsx"
     json_path = EXPORT_DIR / f"speer_{run_id}_{timestamp}.json"
     ok_xlsx_path = EXPORT_DIR / f"speer_{run_id}_{timestamp}_payment.xlsx"
+    review_xlsx_path = EXPORT_DIR / f"speer_{run_id}_{timestamp}_review.xlsx"
+    review_json_path = EXPORT_DIR / f"speer_{run_id}_{timestamp}_review.json"
 
     if hasattr(speer_core, "export_outputs"):
         return speer_core.export_outputs(
-            records, xlsx_path, json_path, ok_xlsx_path, run_id
+            records,
+            xlsx_path,
+            json_path,
+            ok_xlsx_path,
+            review_xlsx_path,
+            review_json_path,
+            run_id,
         )
 
     speer_core.export_xlsx(records, xlsx_path)
-    speer_core.export_json_audit(records, json_path, run_id)
     speer_core.export_payment_instructions(records, ok_xlsx_path)
+    speer_core.export_review_pack(records, review_xlsx_path)
+    speer_core.export_json_audit(records, json_path, run_id)
+    speer_core.export_review_json(records, review_json_path, run_id)
 
     return {
         "run_id": run_id,
         "xlsx": str(xlsx_path),
         "json": str(json_path),
         "ok_xlsx": str(ok_xlsx_path),
+        "review_xlsx": str(review_xlsx_path),
+        "review_json": str(review_json_path),
     }
 
 
@@ -385,18 +418,19 @@ async def upload(files: list[UploadFile] = File(...)) -> RedirectResponse:
                     {
                         **record.to_dict(),
                         "status": "needs_review",
+                        "payment_ready": False,
                         "parse_errors": record.parse_errors + errors,
                     }
                 )
             records.append(record)
             continue
 
+        if not is_allowed:
+            reason = f"unsupported_format:{suffix or 'unknown'}"
+        else:
+            reason = f"non_pdf_evidence:{suffix or 'unknown'}"
+
         file_location = str(file_path) if file_path else f"memory:{safe_name}"
-        reason = (
-            f"non_pdf_evidence:{suffix or 'unknown'}"
-            if is_allowed
-            else f"unsupported_format:{suffix or 'unknown'}"
-        )
         record = _non_pdf_record(file_location, file_hash, reason, errors)
         records.append(record)
 
@@ -423,3 +457,13 @@ def download_ok() -> FileResponse:
             status_code=404,
         )
     return FileResponse(latest_exports["ok_xlsx"], filename="speer_payment.xlsx")
+
+
+@app.get("/download/review")
+def download_review() -> FileResponse:
+    if not latest_exports or not latest_exports.get("review_xlsx"):
+        return HTMLResponse(
+            "No review file available yet. Upload evidence files first.",
+            status_code=404,
+        )
+    return FileResponse(latest_exports["review_xlsx"], filename="speer_review.xlsx")
