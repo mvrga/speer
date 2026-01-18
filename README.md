@@ -1,47 +1,65 @@
 # Speer
 
 ## Overview
-Speer is a financial evidence ingestion system. It reads invoices, extracts payment‑critical fields, and stores every file as evidence. The system is deterministic and audit‑oriented: every decision is traceable and every file remains available for review.
+Speer is a financial evidence ingestion system for invoices. It extracts payment‑critical fields, stores every file as evidence, and prepares payment files for manual approval.
 
-## Architecture
-Speer achieves near‑100% coverage through layered extraction:
-- XML when available (highest reliability)
-- PDF text extraction for digital invoices
-- OCR fallback for scanned PDFs and images
-- Manual review for edge cases and ambiguous data
+## Key concepts
+- Invoices are treated as evidence: every file is stored and logged, even when parsing fails.
+- Extraction uses PDF text parsing with OCR fallback for scans.
+- Payment preparation is separated from payment execution.
 
-This layered approach avoids guessing. If a field is missing or uncertain, Speer marks the record for review instead of assuming values.
+## Features
+- Upload PDFs, images, XML, and ZIP files.
+- Automatic extraction of invoice number, date, amount, currency, IBAN, and BIC.
+- Audit log with SHA256 hashes and run metadata.
+- Exports:
+  - XLSX for all invoices
+  - XLSX payment instruction file (payment‑ready only)
+  - XLSX review file (needs_review only)
+  - JSON audit log and review log
 
-## Dashboard
-The dashboard is a single‑page HTML interface for business managers. It shows:
-- Total evidence uploaded
-- Invoices ready for payment
-- Invoices needing review
-- A simple table with file name, status, payment readiness, and amount
-
-Uploads are accepted in PDF, PNG, JPG/JPEG, XML, and ZIP. Every upload is recorded as evidence, even if parsing fails.
-
-## Payments & Revolut
-Speer prepares payment instruction files but does not execute payments. This keeps approval separate from extraction and reduces operational risk. The payment file format is compatible with Revolut Business batch payment imports, so finance teams can review and submit payments in their banking interface.
-
-## Review workflow
-When a record is marked as needs_review, Speer generates a review pack:
-- A manager‑friendly XLSX with key fields and errors
-- A developer‑focused JSON log for troubleshooting
-
-This ensures operational clarity for both finance and technical teams.
-
-## How to run locally (macOS M1)
+## Local setup (macOS)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+## Local setup (Linux)
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Local setup (Windows)
+```powershell
+py -3 -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+pip install -r requirements.txt
+```
+
+## Run the app
+```bash
 uvicorn app:app --reload
 ```
 
 Open `http://127.0.0.1:8000/dashboard`.
 
-## Limitations & roadmap
-- No automated payment execution; payments always require manual approval.
-- OCR quality depends on scan quality and the local Tesseract install.
-- XML parsing is a stub in the MVP; planned next step is full support for structured e‑invoice formats.
+## Local test quick-check (Linux/Windows/macOS)
+- Start the app and upload at least one PDF.
+- Confirm the dashboard counters update and the download buttons return files.
+
+## Manual testing steps
+1) Upload a valid PDF invoice with clear invoice number, IBAN, and amount.
+2) Upload a scanned invoice (image‑only PDF) to trigger OCR fallback.
+3) Upload an unsupported file (e.g., ZIP) to verify it is recorded as needs_review.
+4) Upload a second batch to confirm a new run ID and new export files.
+5) Download the exports and verify:
+   - Payment file contains only payment‑ready invoices.
+   - Review file contains all needs_review invoices.
+   - JSON audit log contains SHA256 hashes and all records.
+
+## Notes
+- Payments are never executed automatically; approvals happen outside Speer.
+- If extraction is uncertain, records are flagged for review.
