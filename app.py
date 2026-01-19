@@ -79,10 +79,11 @@ HTML_PAGE = """
       padding: 0.75rem 0;
     }
     .logo {
-      font-size: 1.4rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
+      font-size: 2.4rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
       text-transform: lowercase;
+      line-height: 1;
     }
     .nav-links {
       display: flex;
